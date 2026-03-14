@@ -432,7 +432,7 @@ Stop guessing about your progress. See it. Charts, heatmaps, domain breakdowns, 
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/founderlog.git
+git clone https://github.com/Aditya1046785/founderlog.git
 cd founderlog
 
 # Install
