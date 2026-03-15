@@ -292,14 +292,18 @@ export async function updateStreak(): Promise<void> {
   await setAppStateValue('last_active_date', today);
 }
 
-export async function getStreakInfo(): Promise<{ currentStreak: number; bestStreak: number }> {
-  const [currentStreakRaw, bestStreakRaw] = await Promise.all([
+export async function getStreakInfo(): Promise<{ currentStreak: number; bestStreak: number; isActiveToday: boolean }> {
+  const [currentStreakRaw, bestStreakRaw, lastActiveDate] = await Promise.all([
     getAppStateValue('current_streak'),
     getAppStateValue('best_streak'),
+    getAppStateValue('last_active_date'),
   ]);
+
+  const today = getLocalDateString();
 
   return {
     currentStreak: Number.parseInt(currentStreakRaw || '0', 10) || 0,
     bestStreak: Number.parseInt(bestStreakRaw || '0', 10) || 0,
+    isActiveToday: lastActiveDate === today,
   };
 }

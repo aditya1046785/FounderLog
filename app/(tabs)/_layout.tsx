@@ -11,6 +11,7 @@ import {
   FONT_WEIGHTS,
   SPACING,
 } from '../../src/constants/theme';
+import { useAppStore } from '../../src/store/useAppStore';
 
 type IconNamePair = {
   outline: keyof typeof Ionicons.glyphMap;
@@ -35,6 +36,8 @@ function TabIcon({ focused, color, names }: { focused: boolean; color: string; n
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
+  const todayProblemsCount = useAppStore((state) => state.todayProblemsCount);
+  const remaining = Math.max(0, 10 - todayProblemsCount);
 
   return (
     <Tabs
@@ -54,6 +57,8 @@ export default function TabLayout() {
         name="index"
         options={{
           title: 'Mission Control',
+          tabBarBadge: remaining > 0 ? remaining : undefined,
+          tabBarBadgeStyle: styles.badge,
           tabBarLabel: ({ focused, color }) => (
             <Text
               style={[
@@ -159,5 +164,16 @@ const styles = StyleSheet.create({
     marginTop: SPACING.xs,
     fontSize: FONT_SIZES.sm,
     lineHeight: 16,
+  },
+  badge: {
+    backgroundColor: COLORS.danger,
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: FONT_WEIGHTS.bold,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    top: 4,
   },
 });

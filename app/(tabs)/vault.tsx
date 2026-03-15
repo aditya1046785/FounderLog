@@ -1,5 +1,5 @@
 import { BlurView } from 'expo-blur';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import {
   format,
@@ -12,7 +12,7 @@ import {
 } from 'date-fns';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Modal,
@@ -21,6 +21,7 @@ import {
   SectionList,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { Swipeable } from 'react-native-gesture-handler';
@@ -109,6 +110,17 @@ const DOMAIN_META: Record<string, string> = {
   environment: '🌍 Environment',
   other: '❓ Other',
 };
+
+function stripHtml(input: string | null): string {
+  if (!input) {
+    return '';
+  }
+  return input.replace(/<[^>]*>/g, ' ');
+}
+
+function normalize(input: string): string {
+  return input.toLowerCase().replace(/\s+/g, ' ').trim();
+}
 
 function getStatusColor(status: Problem['status']): string {
   if (status === 'open') {
@@ -253,6 +265,12 @@ const VaultCard = memo(function VaultCard({
         />
 
         <View style={styles.cardBody}>
+          {item.is_quick_capture ? (
+            <View style={styles.quickCaptureBadge}>
+              <Text style={styles.quickCaptureBadgeText}>⚡ QUICK</Text>
+            </View>
+          ) : null}
+
           <Text numberOfLines={2} style={styles.cardTitle}>
             {item.title}
           </Text>
@@ -313,6 +331,7 @@ function SkeletonCard() {
 
 export default function VaultScreen() {
   const insets = useSafeAreaInsets();
+  const params = useLocalSearchParams<{ withoutIdeas?: string }>();
   const problems = useAppStore((state) => state.problems);
   const isLoading = useAppStore((state) => state.isLoading);
   const refreshAll = useAppStore((state) => state.refreshAll);
@@ -328,6 +347,23 @@ export default function VaultScreen() {
   const [domainFilter, setDomainFilter] = useState<string>('all');
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('all');
   const [withoutIdeasOnly, setWithoutIdeasOnly] = useState(false);
+  const [quickCapturesOnly, setQuickCapturesOnly] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery.trim());
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (params.withoutIdeas === '1' || params.withoutIdeas === 'true') {
+      setWithoutIdeasOnly(true);
+    }
+  }, [params.withoutIdeas]);
 
   const fabFloat = useSharedValue(0);
   fabFloat.value = withRepeat(
@@ -350,6 +386,7 @@ export default function VaultScreen() {
 
     return problems.filter((item) => {
       const created = parseISO(item.created_at);
+      const normalizedSearch = normalize(debouncedSearch);
 
       if (statusFilter !== 'all' && item.status !== statusFilter) {
         return false;
@@ -359,6 +396,19 @@ export default function VaultScreen() {
       }
       if (withoutIdeasOnly && (item.linked_ideas_count ?? 0) > 0) {
         return false;
+      }
+      if (quickCapturesOnly && !item.is_quick_capture) {
+        return false;
+      }
+
+      if (normalizedSearch) {
+        const tagText = (item.custom_tags ?? []).join(' ');
+        const haystack = normalize(
+          `${item.title || ''} ${stripHtml(item.description)} ${tagText} ${item.domain || ''}`
+        );
+        if (!haystack.includes(normalizedSearch)) {
+          return false;
+        }
       }
 
       if (timeFilter === 'today' && !isToday(created)) {
@@ -373,7 +423,14 @@ export default function VaultScreen() {
 
       return true;
     });
-  }, [domainFilter, problems, statusFilter, timeFilter, withoutIdeasOnly]);
+  }, [debouncedSearch, domainFilter, problems, quickCapturesOnly, statusFilter, timeFilter, withoutIdeasOnly]);
+
+  const activeFilterCount =
+    (statusFilter !== 'all' ? 1 : 0) +
+    (domainFilter !== 'all' ? 1 : 0) +
+    (timeFilter !== 'all' ? 1 : 0) +
+    (withoutIdeasOnly ? 1 : 0) +
+    (quickCapturesOnly ? 1 : 0);
 
   const sections = useMemo<VaultSection[]>(() => {
     const groups = new Map<string, Problem[]>();
@@ -414,7 +471,13 @@ export default function VaultScreen() {
   };
 
   const confirmDelete = (problem: Problem) => {
-    Alert.alert('Delete observation?', 'This will permanently remove this problem from your vault.', [
+    const linkedCount = problem.linked_ideas_count ?? 0;
+    const contextMessage =
+      linkedCount > 0
+        ? `This will also remove ${linkedCount} idea links.`
+        : 'This will permanently remove this problem from your vault.';
+
+    Alert.alert('Delete this problem?', contextMessage, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
@@ -423,7 +486,7 @@ export default function VaultScreen() {
           void (async () => {
             try {
               await removeProblem(problem.id);
-              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+              await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
             } catch (error) {
               console.error('Failed to delete problem:', error);
             }
@@ -438,6 +501,9 @@ export default function VaultScreen() {
     setDomainFilter('all');
     setTimeFilter('all');
     setWithoutIdeasOnly(false);
+    setQuickCapturesOnly(false);
+    setSearchQuery('');
+    setDebouncedSearch('');
   };
 
   return (
@@ -449,8 +515,21 @@ export default function VaultScreen() {
         </View>
 
         <Pressable onPress={() => setFiltersOpen(true)} style={styles.filterButton}>
-          <Ionicons color={COLORS.textSecondary} name="options-outline" size={20} />
+          <Ionicons color={COLORS.textSecondary} name="options-outline" size={18} />
+          <Text style={styles.filterButtonText}>Filters ({activeFilterCount})</Text>
         </Pressable>
+      </View>
+
+      <View style={styles.searchWrap}>
+        <Ionicons color={COLORS.textTertiary} name="search-outline" size={18} />
+        <TextInput
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          placeholder="Search problems..."
+          placeholderTextColor={COLORS.textTertiary}
+          style={styles.searchInput}
+          returnKeyType="search"
+        />
       </View>
 
       {isLoading && problems.length === 0 ? (
@@ -462,15 +541,26 @@ export default function VaultScreen() {
       ) : filteredProblems.length === 0 ? (
         <View style={styles.emptyWrap}>
           <Animated.View style={[styles.emptyIconBubble, fabStyle]}>
-            <Text style={styles.emptyIcon}>🔍</Text>
+            <Text style={styles.emptyIcon}>{debouncedSearch ? '🤷' : '🔍'}</Text>
           </Animated.View>
-          <Text style={styles.emptyTitle}>Your vault is empty</Text>
+          <Text style={styles.emptyTitle}>{debouncedSearch ? 'No problems match your search' : 'Your vault is empty'}</Text>
           <Text style={styles.emptySubtitle}>
-            Start observing problems around you. The world is full of them.
+            {debouncedSearch
+              ? 'Try another keyword or clear some filters.'
+              : 'Start observing problems around you. The world is full of them.'}
           </Text>
-          <Pressable onPress={() => router.push('/problem/editor')}>
+          <Pressable
+            onPress={() => {
+              if (debouncedSearch) {
+                setSearchQuery('');
+                setDebouncedSearch('');
+                return;
+              }
+              router.push('/problem/editor');
+            }}
+          >
             <LinearGradient colors={[COLORS.accent, COLORS.fire]} end={{ x: 1, y: 0.5 }} start={{ x: 0, y: 0.5 }} style={styles.emptyCta}>
-              <Text style={styles.emptyCtaText}>OBSERVE YOUR FIRST PROBLEM</Text>
+              <Text style={styles.emptyCtaText}>{debouncedSearch ? 'CLEAR SEARCH' : 'OBSERVE YOUR FIRST PROBLEM'}</Text>
             </LinearGradient>
           </Pressable>
         </View>
@@ -490,7 +580,9 @@ export default function VaultScreen() {
               onAddIdea={() => router.push(`/idea/editor?problemId=${item.id}`)}
               onDelete={() => confirmDelete(item)}
               onLongPress={() => openQuickActions(item)}
-              onPress={() => router.push(`/problem/${item.id}`)}
+              onPress={() =>
+                item.is_quick_capture ? router.push(`/problem/editor?problemId=${item.id}`) : router.push(`/problem/${item.id}`)
+              }
             />
           )}
           renderSectionHeader={({ section }) => (
@@ -562,11 +654,16 @@ export default function VaultScreen() {
                   onPress={() => setWithoutIdeasOnly((prev) => !prev)}
                   selected={withoutIdeasOnly}
                 />
+                <FilterChip
+                  label="Quick Captures Only"
+                  onPress={() => setQuickCapturesOnly((prev) => !prev)}
+                  selected={quickCapturesOnly}
+                />
               </View>
 
               <View style={styles.sheetActionRow}>
                 <Pressable onPress={resetFilters}>
-                  <Text style={styles.resetText}>Reset</Text>
+                  <Text style={styles.resetText}>Reset All</Text>
                 </Pressable>
                 <Pressable onPress={() => setFiltersOpen(false)}>
                   <LinearGradient colors={[COLORS.accent, COLORS.fire]} end={{ x: 1, y: 0.5 }} start={{ x: 0, y: 0.5 }} style={styles.applyButton}>
@@ -671,12 +768,39 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   filterButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     backgroundColor: COLORS.glassBg,
     borderWidth: 1,
     borderColor: COLORS.glassBorder,
     borderRadius: BORDER_RADIUS.full,
     paddingHorizontal: 12,
     paddingVertical: 8,
+  },
+  filterButtonText: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.xs,
+    fontWeight: FONT_WEIGHTS.medium,
+  },
+  searchWrap: {
+    marginTop: SPACING.sm,
+    marginHorizontal: SPACING.lg,
+    marginBottom: 4,
+    borderRadius: BORDER_RADIUS.full,
+    borderWidth: 1,
+    borderColor: COLORS.glassBorder,
+    backgroundColor: COLORS.glassBg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    minHeight: 44,
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    color: COLORS.textPrimary,
+    fontSize: FONT_SIZES.sm,
   },
   dateHeaderRow: {
     paddingTop: 20,
@@ -724,6 +848,22 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     paddingHorizontal: 14,
     paddingLeft: 16,
+  },
+  quickCaptureBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,184,0,0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,184,0,0.38)',
+    borderRadius: BORDER_RADIUS.full,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  quickCaptureBadgeText: {
+    color: COLORS.accent,
+    fontSize: 10,
+    fontWeight: FONT_WEIGHTS.bold,
+    letterSpacing: 0.9,
   },
   cardTitle: {
     color: COLORS.textPrimary,

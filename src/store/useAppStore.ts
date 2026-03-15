@@ -25,6 +25,19 @@ import {
   updateProblem,
   updateProblemStatus,
 } from '../database/problemService';
+import { CelebrationItem } from '../components/common/CelebrationModal';
+import { onProblemSaved } from '../utils/notifications';
+import {
+  addScore,
+  calculateDailyBonus,
+  calculatePointsForIdea,
+  calculatePointsForProblem,
+  checkProblemMilestone,
+  checkStreakMilestone,
+  getScoreBreakdown,
+  getFirstIdeaBonus,
+  getFirstProblemBonus,
+} from '../utils/scoring';
 
 export interface Problem {
   id: string;
@@ -79,6 +92,13 @@ type AppState = {
   currentStreak: number;
   bestStreak: number;
   totalScore: number;
+  scoreFromProblems: number;
+  scoreFromIdeas: number;
+  scoreFromBonuses: number;
+  notificationPermissionStatus: string;
+  remindersEnabled: boolean;
+  currentCelebration: CelebrationItem | null;
+  pendingCelebrations: CelebrationItem[];
   isLoading: boolean;
   todayLog: DailyLog | null;
   initialize: () => Promise<void>;
@@ -91,10 +111,61 @@ type AppState = {
   removeIdea: (id: string) => Promise<void>;
   refreshAll: () => Promise<void>;
   refreshTodayCounts: () => Promise<void>;
+  enqueueCelebration: (celebration: CelebrationItem) => void;
+  dismissCelebration: () => void;
 };
 
+function createCelebration(args: {
+  type: CelebrationItem['type'];
+  title: string;
+  subtitle: string;
+  points: number;
+  ctaLabel?: string;
+}): CelebrationItem {
+  return {
+    id: `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    type: args.type,
+    title: args.title,
+    subtitle: args.subtitle,
+    points: args.points,
+    ctaLabel: args.ctaLabel,
+  };
+}
+
+function getStreakSubtitle(streak: number): string {
+  if (streak === 7) {
+    return "One week of consistent observation. You're building the muscle.";
+  }
+  if (streak === 14) {
+    return '14 days of momentum. Consistency is compounding.';
+  }
+  if (streak === 30) {
+    return "30 days! Most people quit at 3. You're different.";
+  }
+  if (streak === 60) {
+    return '60 days strong. This is founder discipline in action.';
+  }
+  if (streak === 100) {
+    return "100 DAYS. You're in the top 1% of founders. Legendary.";
+  }
+  if (streak === 365) {
+    return 'A full year of observation. This is mastery.';
+  }
+  return 'Consistency compounds into startup intuition.';
+}
+
 async function loadSnapshot() {
-  const [problems, ideas, todayProblemsCount, todayIdeasCount, streakInfo, totalScoreRaw, todayLog] =
+  const [
+    problems,
+    ideas,
+    todayProblemsCount,
+    todayIdeasCount,
+    streakInfo,
+    totalScoreRaw,
+    todayLog,
+    notificationPermissionStatusRaw,
+    scoreBreakdown,
+  ] =
     await Promise.all([
       getAllProblems(),
       getAllIdeas(),
@@ -103,7 +174,11 @@ async function loadSnapshot() {
       getStreakInfo(),
       getAppStateValue('total_score'),
       getOrCreateTodayLog(),
+      getAppStateValue('notification_permission_status'),
+      getScoreBreakdown(),
     ]);
+
+  const notificationPermissionStatus = notificationPermissionStatusRaw || 'undetermined';
 
   return {
     problems,
@@ -113,6 +188,11 @@ async function loadSnapshot() {
     currentStreak: streakInfo.currentStreak,
     bestStreak: streakInfo.bestStreak,
     totalScore: Number.parseInt(totalScoreRaw || '0', 10) || 0,
+    scoreFromProblems: scoreBreakdown.fromProblems,
+    scoreFromIdeas: scoreBreakdown.fromIdeas,
+    scoreFromBonuses: scoreBreakdown.fromBonuses,
+    notificationPermissionStatus,
+    remindersEnabled: notificationPermissionStatus === 'granted',
     todayLog,
   };
 }
@@ -125,6 +205,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentStreak: 0,
   bestStreak: 0,
   totalScore: 0,
+  scoreFromProblems: 0,
+  scoreFromIdeas: 0,
+  scoreFromBonuses: 0,
+  notificationPermissionStatus: 'undetermined',
+  remindersEnabled: false,
+  currentCelebration: null,
+  pendingCelebrations: [],
   isLoading: true,
   todayLog: null,
 
@@ -143,8 +230,92 @@ export const useAppStore = create<AppState>((set, get) => ({
   addProblem: async (problem) => {
     set({ isLoading: true });
     try {
+      const prevState = get();
+      const previousProblemsCount = prevState.problems.length;
+      const previousTodayProblemsCount = prevState.todayProblemsCount;
+      const previousStreak = prevState.currentStreak;
+
       await createProblem(problem);
+      await onProblemSaved();
+
+      const [todayProblemsCountAfterSave, streakInfoAfterSave] = await Promise.all([
+        getTodayProblemsCount(),
+        getStreakInfo(),
+      ]);
+
+      const totalProblemsAfterSave = previousProblemsCount + 1;
+
+      const basePoints = calculatePointsForProblem();
+      const firstProblemBonus = getFirstProblemBonus(previousProblemsCount === 0);
+      const dailyBonus =
+        previousTodayProblemsCount < 10 ? calculateDailyBonus(todayProblemsCountAfterSave) : 0;
+      const problemMilestoneBonus = checkProblemMilestone(totalProblemsAfterSave);
+      const streakMilestoneBonus =
+        streakInfoAfterSave.currentStreak > previousStreak
+          ? checkStreakMilestone(streakInfoAfterSave.currentStreak)
+          : 0;
+
+      const bonusPoints =
+        firstProblemBonus + dailyBonus + problemMilestoneBonus + streakMilestoneBonus;
+      const totalPoints = basePoints + bonusPoints;
+
+      await addScore(totalPoints, {
+        fromProblems: basePoints,
+        fromBonuses: bonusPoints,
+      });
+
+      const celebrations: CelebrationItem[] = [];
+
+      if (firstProblemBonus > 0) {
+        celebrations.push(
+          createCelebration({
+            type: 'first',
+            title: 'FIRST PROBLEM LOGGED!',
+            subtitle: 'You just started a founder habit that compounds for years.',
+            points: firstProblemBonus,
+            ctaLabel: "LET'S GO",
+          })
+        );
+      }
+
+      if (dailyBonus > 0) {
+        celebrations.push(
+          createCelebration({
+            type: 'daily',
+            title: 'DAILY TARGET COMPLETE!',
+            subtitle: "Today's mission: accomplished. ✅",
+            points: dailyBonus,
+          })
+        );
+      }
+
+      if (problemMilestoneBonus > 0) {
+        celebrations.push(
+          createCelebration({
+            type: 'problem',
+            title: `${totalProblemsAfterSave} PROBLEMS!`,
+            subtitle: `${totalProblemsAfterSave} problems observed. That's ${totalProblemsAfterSave} potential startups.`,
+            points: problemMilestoneBonus,
+          })
+        );
+      }
+
+      if (streakMilestoneBonus > 0) {
+        celebrations.push(
+          createCelebration({
+            type: 'streak',
+            title: 'STREAK MILESTONE!',
+            subtitle: getStreakSubtitle(streakInfoAfterSave.currentStreak),
+            points: streakMilestoneBonus,
+          })
+        );
+      }
+
       await get().refreshAll();
+
+      for (const celebration of celebrations) {
+        get().enqueueCelebration(celebration);
+      }
     } catch (error) {
       console.error('Failed to add problem:', error);
       set({ isLoading: false });
@@ -187,8 +358,31 @@ export const useAppStore = create<AppState>((set, get) => ({
   addIdea: async (idea, linkedProblemIds) => {
     set({ isLoading: true });
     try {
+      const prevIdeasCount = get().ideas.length;
       await createIdea(idea, linkedProblemIds);
+
+      const basePoints = calculatePointsForIdea();
+      const firstIdeaBonus = getFirstIdeaBonus(prevIdeasCount === 0);
+      const totalPoints = basePoints + firstIdeaBonus;
+
+      await addScore(totalPoints, {
+        fromIdeas: basePoints,
+        fromBonuses: firstIdeaBonus,
+      });
+
       await get().refreshAll();
+
+      if (firstIdeaBonus > 0) {
+        get().enqueueCelebration(
+          createCelebration({
+            type: 'first',
+            title: 'FIRST IDEA CREATED!',
+            subtitle: 'From observation to solution. This is founder progress.',
+            points: firstIdeaBonus,
+            ctaLabel: "LET'S GO",
+          })
+        );
+      }
     } catch (error) {
       console.error('Failed to add idea:', error);
       set({ isLoading: false });
@@ -239,5 +433,46 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (error) {
       console.error('Failed to refresh today counts:', error);
     }
+  },
+
+  enqueueCelebration: (celebration) => {
+    set((state) => {
+      if (!state.currentCelebration) {
+        return {
+          ...state,
+          currentCelebration: celebration,
+        };
+      }
+
+      return {
+        ...state,
+        pendingCelebrations: [...state.pendingCelebrations, celebration],
+      };
+    });
+  },
+
+  dismissCelebration: () => {
+    const { pendingCelebrations } = get();
+
+    if (pendingCelebrations.length === 0) {
+      set({ currentCelebration: null });
+      return;
+    }
+
+    set({ currentCelebration: null, pendingCelebrations: pendingCelebrations.slice(1) });
+
+    const next = pendingCelebrations[0];
+    setTimeout(() => {
+      set((state) => {
+        if (state.currentCelebration) {
+          return state;
+        }
+
+        return {
+          ...state,
+          currentCelebration: next,
+        };
+      });
+    }, 500);
   },
 }));
